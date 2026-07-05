@@ -18,8 +18,10 @@ Hookstash is early. The current build includes:
 - Queued status when forwarding fails
 - Provider hints from common webhook headers
 - Local dashboard for browsing captured requests
+- Realtime dashboard refresh with Server-Sent Events
+- Replay captured requests to a target URL
 
-Replay editor, retry controls, and cURL export are planned next.
+Replay editing, retry controls, and cURL export are planned next.
 
 ## Quick Start
 
@@ -49,7 +51,7 @@ List captured requests:
 curl http://127.0.0.1:4040/api/requests
 ```
 
-The dashboard fetches captured requests from `GET /api/requests` and shows request details, headers, body, provider hints, and forwarding results.
+The dashboard fetches captured requests from `GET /api/requests` and shows request details, headers, body, provider hints, and forwarding results. It also listens to `GET /api/events` so new captures appear without refreshing the page.
 
 ## Forward To Your App
 
@@ -129,6 +131,30 @@ Get one captured request:
 ```txt
 GET /api/requests/{id}
 ```
+
+Subscribe to dashboard events:
+
+```txt
+GET /api/events
+```
+
+The event stream currently publishes `request.created` when a captured request is available.
+
+Replay a captured request:
+
+```txt
+POST /api/requests/{id}/replay
+```
+
+Payload:
+
+```json
+{
+  "target_url": "http://127.0.0.1:8000/webhooks"
+}
+```
+
+Replay sends the original method, headers, and body. It filters hop-by-hop headers such as `Connection`, `Transfer-Encoding`, `Content-Length`, and `Host`.
 
 Example capture response:
 
@@ -225,11 +251,8 @@ Captured headers may contain secrets. Be careful when sharing API responses, dat
 
 Near-term milestones:
 
-1. Dashboard v1
-2. Server-Sent Events for live updates
-3. Replay captured requests
-4. Edit body and headers before replay
-5. Retry queued forwards
-6. Export captured requests as cURL
+1. Edit body and headers before replay
+2. Retry queued forwards
+3. Export captured requests as cURL
 
 Hookstash is intentionally not a hosted webhook platform in v1. No accounts, cloud sync, hosted webhook URLs, billing, teams, or API gateway behavior.

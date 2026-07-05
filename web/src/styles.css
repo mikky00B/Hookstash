@@ -92,6 +92,52 @@ pre {
   color: #102923;
 }
 
+.live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid #d8e1df;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #53615e;
+  font-size: 0.82rem;
+  font-weight: 800;
+  box-shadow: 0 8px 24px rgb(26 43 39 / 7%);
+}
+
+.live-indicator span {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #9aa5a2;
+}
+
+.live-live {
+  color: #0d6049;
+}
+
+.live-live span {
+  background: #13a371;
+}
+
+.live-reconnecting {
+  color: #8b5b08;
+}
+
+.live-reconnecting span {
+  background: #d79412;
+}
+
+.live-offline {
+  color: #7a3c35;
+}
+
+.live-offline span {
+  background: #b94b40;
+}
+
 .alert,
 .panel,
 .empty-state {
@@ -331,6 +377,104 @@ pre {
   background: #fff6f1;
 }
 
+.replay-box {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 22px;
+  padding: 16px;
+  border: 1px solid #dfe8e5;
+  border-radius: 8px;
+  background: #f9fbfa;
+}
+
+.replay-box h3,
+.replay-box p {
+  margin: 0;
+}
+
+.replay-box h3 {
+  font-size: 0.96rem;
+}
+
+.replay-box p {
+  color: #60706c;
+  font-size: 0.9rem;
+}
+
+.replay-box label {
+  display: grid;
+  gap: 6px;
+}
+
+.replay-box label span {
+  color: #687874;
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.replay-box input {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid #cdd9d6;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+}
+
+.replay-box input:focus {
+  border-color: #16735f;
+  outline: 3px solid #dcefe9;
+}
+
+.replay-box button {
+  justify-self: start;
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: #16735f;
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.replay-box button:disabled {
+  background: #91a19d;
+  cursor: wait;
+}
+
+.replay-result {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.replay-result-success {
+  border: 1px solid #b8dfd1;
+  background: #eef9f5;
+  color: #0d6049;
+}
+
+.replay-result-error {
+  border: 1px solid #f1c8b9;
+  background: #fff6f1;
+  color: #7b2a1c;
+}
+
+.replay-result pre {
+  overflow: auto;
+  max-width: 100%;
+  margin: 4px 0 0;
+  padding: 12px;
+  border-radius: 6px;
+  background: #111a1f;
+  color: #eaf2ef;
+}
+
 .detail-section {
   display: grid;
   gap: 10px;
@@ -383,6 +527,10 @@ pre {
   .detail-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .live-indicator {
+    align-self: flex-start;
   }
 
   .dashboard-grid,

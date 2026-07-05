@@ -1,6 +1,7 @@
 .gocache/
 .gomodcache/
 .gotelemetry/
+.goappdata/
 hookstash.db
 *.db
 *.db-shm
@@ -13,3 +14,4 @@ yarn-error.log*
 .env
 .env.*
 .tmp-*.png
+AGENTS.md

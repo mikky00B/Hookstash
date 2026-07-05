@@ -138,6 +138,49 @@ WHERE id = ?`,
 	return nil
 }
 
+func (s *SQLiteStore) CreateReplayAttempt(ctx context.Context, attempt ReplayAttempt) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO replay_attempts (
+	id, request_id, target_url, edited_body, edited_headers_json, status_code,
+	response_body, error, duration_ms, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		attempt.ID,
+		attempt.RequestID,
+		attempt.TargetURL,
+		attempt.EditedBody,
+		attempt.EditedHeadersJSON,
+		attempt.StatusCode,
+		attempt.ResponseBody,
+		attempt.Error,
+		attempt.DurationMS,
+		attempt.CreatedAt.UTC(),
+	)
+	return err
+}
+
+func (s *SQLiteStore) ListReplayAttempts(ctx context.Context, requestID string) ([]ReplayAttempt, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, request_id, target_url, edited_body, edited_headers_json, status_code,
+	response_body, error, duration_ms, created_at
+FROM replay_attempts
+WHERE request_id = ?
+ORDER BY created_at DESC`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attempts []ReplayAttempt
+	for rows.Next() {
+		attempt, err := scanReplayAttempt(rows)
+		if err != nil {
+			return nil, err
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, rows.Err()
+}
+
 type requestScanner interface {
 	Scan(dest ...any) error
 }
@@ -165,6 +208,25 @@ func scanRequest(scanner requestScanner) (CapturedRequest, error) {
 	)
 	req.ReceivedAt = receivedAt.UTC()
 	return req, err
+}
+
+func scanReplayAttempt(scanner requestScanner) (ReplayAttempt, error) {
+	var attempt ReplayAttempt
+	var createdAt time.Time
+	err := scanner.Scan(
+		&attempt.ID,
+		&attempt.RequestID,
+		&attempt.TargetURL,
+		&attempt.EditedBody,
+		&attempt.EditedHeadersJSON,
+		&attempt.StatusCode,
+		&attempt.ResponseBody,
+		&attempt.Error,
+		&attempt.DurationMS,
+		&createdAt,
+	)
+	attempt.CreatedAt = createdAt.UTC()
+	return attempt, err
 }
 
 var ErrNotFound = errors.New("not found")

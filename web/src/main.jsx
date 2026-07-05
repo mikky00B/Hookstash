@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -12,11 +12,13 @@ function App() {
   const [selectedID, setSelectedID] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [liveStatus, setLiveStatus] = useState("Offline");
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadRequests() {
+  const loadRequests = useCallback(
+    async ({ showLoading = false } = {}) => {
+      if (showLoading) {
+        setLoading(true);
+      }
       try {
         const response = await fetch("/api/requests");
         if (!response.ok) {
@@ -24,27 +26,47 @@ function App() {
         }
         const data = await response.json();
         const nextRequests = Array.isArray(data.requests) ? data.requests : [];
-        if (!cancelled) {
-          setRequests(nextRequests);
-          setSelectedID((current) => current ?? nextRequests[0]?.id ?? null);
-          setError("");
-        }
+        setRequests(nextRequests);
+        setSelectedID((current) => current ?? nextRequests[0]?.id ?? null);
+        setError("");
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Could not load requests");
-        }
+        setError(err instanceof Error ? err.message : "Could not load requests");
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        setLoading(false);
       }
+    },
+    []
+  );
+
+  useEffect(() => {
+    loadRequests({ showLoading: true });
+  }, [loadRequests]);
+
+  useEffect(() => {
+    if (!("EventSource" in window)) {
+      setLiveStatus("Offline");
+      return undefined;
     }
 
-    loadRequests();
-    return () => {
-      cancelled = true;
+    const events = new EventSource("/api/events");
+    setLiveStatus("Reconnecting");
+
+    events.onopen = () => {
+      setLiveStatus("Live");
     };
-  }, []);
+
+    events.onerror = () => {
+      setLiveStatus(events.readyState === EventSource.CLOSED ? "Offline" : "Reconnecting");
+    };
+
+    events.addEventListener("request.created", () => {
+      loadRequests();
+    });
+
+    return () => {
+      events.close();
+    };
+  }, [loadRequests]);
 
   const selected = useMemo(
     () => requests.find((request) => request.id === selectedID) ?? requests[0] ?? null,
@@ -62,6 +84,7 @@ function App() {
           <span>Webhook endpoint</span>
           <code>{webhookEndpoint}</code>
         </div>
+        <LiveIndicator status={liveStatus} />
       </header>
 
       {error && <div className="alert">Could not load captured requests: {error}</div>}
@@ -77,6 +100,15 @@ function App() {
         </section>
       )}
     </main>
+  );
+}
+
+function LiveIndicator({ status }) {
+  return (
+    <div className={`live-indicator live-${status.toLowerCase()}`} aria-live="polite">
+      <span />
+      {status}
+    </div>
   );
 }
 
@@ -130,11 +162,49 @@ function RequestList({ requests, selectedID, onSelect }) {
 }
 
 function RequestDetail({ request }) {
+  const [targetURL, setTargetURL] = useState("");
+  const [replayResult, setReplayResult] = useState(null);
+  const [replayError, setReplayError] = useState("");
+  const [replaying, setReplaying] = useState(false);
+
+  useEffect(() => {
+    setTargetURL(request?.target_url || "");
+    setReplayResult(null);
+    setReplayError("");
+    setReplaying(false);
+  }, [request?.id, request?.target_url]);
+
   if (!request) {
     return null;
   }
 
   const headers = parseHeaders(request.headers_json);
+
+  async function replayRequest(event) {
+    event.preventDefault();
+    setReplayError("");
+    setReplayResult(null);
+    setReplaying(true);
+
+    try {
+      const response = await fetch(`/api/requests/${request.id}/replay`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ target_url: targetURL.trim() })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `Replay failed with ${response.status}`);
+      }
+      setReplayResult(data);
+    } catch (err) {
+      setReplayError(err instanceof Error ? err.message : "Replay failed");
+    } finally {
+      setReplaying(false);
+    }
+  }
 
   return (
     <section className="panel detail-panel">
@@ -161,6 +231,46 @@ function RequestDetail({ request }) {
           <span>{request.forward_error}</span>
         </div>
       )}
+
+      <form className="replay-box" onSubmit={replayRequest}>
+        <div>
+          <h3>Replay</h3>
+          <p>Replay the captured request body and headers to a local target URL.</p>
+        </div>
+        <label>
+          <span>Target URL</span>
+          <input
+            type="url"
+            value={targetURL}
+            onChange={(event) => setTargetURL(event.target.value)}
+            placeholder="http://127.0.0.1:8000/webhooks"
+            required
+          />
+        </label>
+        <button type="submit" disabled={replaying}>
+          {replaying ? "Replaying..." : "Replay"}
+        </button>
+
+        {replayError && (
+          <div className="replay-result replay-result-error">
+            <strong>Replay error</strong>
+            <span>{replayError}</span>
+          </div>
+        )}
+
+        {replayResult && (
+          <div className={replayResult.error ? "replay-result replay-result-error" : "replay-result replay-result-success"}>
+            <strong>{replayResult.error ? "Replay failed" : "Replay sent"}</strong>
+            <span>
+              Status: {replayResult.status_code ?? "none"} · Duration: {formatDuration(replayResult.duration_ms)}
+            </span>
+            {replayResult.error && <span>{replayResult.error}</span>}
+            {replayResult.response_body && (
+              <pre><code>{formatBody(replayResult.response_body)}</code></pre>
+            )}
+          </div>
+        )}
+      </form>
 
       <div className="detail-section">
         <h3>Body</h3>

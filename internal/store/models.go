@@ -20,3 +20,16 @@ type CapturedRequest struct {
 	ForwardDurationMS *int64    `json:"forward_duration_ms"`
 	TargetURL         *string   `json:"target_url"`
 }
+
+type ReplayAttempt struct {
+	ID                string    `json:"id"`
+	RequestID         string    `json:"request_id"`
+	TargetURL         string    `json:"target_url"`
+	EditedBody        []byte    `json:"-"`
+	EditedHeadersJSON *string   `json:"edited_headers_json"`
+	StatusCode        *int      `json:"status_code"`
+	ResponseBody      *string   `json:"response_body"`
+	Error             *string   `json:"error"`
+	DurationMS        int64     `json:"duration_ms"`
+	CreatedAt         time.Time `json:"created_at"`
+}

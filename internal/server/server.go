@@ -15,6 +15,7 @@ import (
 
 	"github.com/hookstash/hookstash/internal/capture"
 	"github.com/hookstash/hookstash/internal/store"
+	"github.com/hookstash/hookstash/internal/stream"
 )
 
 type Store interface {
@@ -22,6 +23,7 @@ type Store interface {
 	ListRequests(ctx context.Context) ([]store.CapturedRequest, error)
 	GetRequest(ctx context.Context, id string) (store.CapturedRequest, error)
 	UpdateForwardResult(ctx context.Context, id string, status string, statusCode *int, forwardError *string, durationMS int64, targetURL string) error
+	CreateReplayAttempt(ctx context.Context, attempt store.ReplayAttempt) error
 }
 
 type Config struct {
@@ -33,6 +35,8 @@ type Server struct {
 	store      Store
 	forwardURL string
 	forwarder  capture.Forwarder
+	replayer   capture.Replayer
+	broker     *stream.Broker
 	mux        *http.ServeMux
 }
 
@@ -41,6 +45,8 @@ func New(cfg Config) http.Handler {
 		store:      cfg.Store,
 		forwardURL: cfg.ForwardURL,
 		forwarder:  capture.NewForwarder(nil),
+		replayer:   capture.NewReplayer(nil),
+		broker:     stream.NewBroker(),
 		mux:        http.NewServeMux(),
 	}
 	s.routes()
@@ -53,8 +59,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 	s.mux.HandleFunc("GET /api/requests", s.handleListRequests)
 	s.mux.HandleFunc("GET /api/requests/{id}", s.handleGetRequest)
+	s.mux.HandleFunc("POST /api/requests/{id}/replay", s.handleReplayRequest)
 	s.mux.HandleFunc("/hooks/default", s.handleCapture)
 	s.mux.HandleFunc("/", s.handleDashboard)
 }
@@ -154,12 +162,52 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.publishRequestCreated(req)
+
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":             req.ID,
 		"captured":       true,
 		"forward_status": req.ForwardStatus,
 		"forward_error":  req.ForwardError,
 	})
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported")
+		return
+	}
+
+	events, unsubscribe := s.broker.Subscribe()
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	_, _ = io.WriteString(w, ": connected\n\n")
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			_, _ = io.WriteString(w, ": heartbeat\n\n")
+			flusher.Flush()
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			writeSSE(w, event)
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +235,94 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, req)
 }
 
+func (s *Server) handleReplayRequest(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		TargetURL string `json:"target_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid replay payload")
+		return
+	}
+	payload.TargetURL = strings.TrimSpace(payload.TargetURL)
+	if payload.TargetURL == "" {
+		writeError(w, http.StatusBadRequest, "target_url is required")
+		return
+	}
+
+	req, err := s.store.GetRequest(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load request")
+		return
+	}
+
+	headers, err := headersFromJSON(req.HeadersJSON)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load request headers")
+		return
+	}
+	body := req.Body
+	if body == nil {
+		body = []byte(req.BodyText)
+	}
+
+	result := s.replayer.Replay(r.Context(), capture.ReplayRequest{
+		Method:    req.Method,
+		TargetURL: payload.TargetURL,
+		Headers:   headers,
+		Body:      body,
+	})
+
+	attempt := store.ReplayAttempt{
+		ID:           newReplayAttemptID(),
+		RequestID:    req.ID,
+		TargetURL:    payload.TargetURL,
+		StatusCode:   result.StatusCode,
+		ResponseBody: result.ResponseBody,
+		Error:        result.Error,
+		DurationMS:   result.DurationMS,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := s.store.CreateReplayAttempt(r.Context(), attempt); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save replay attempt")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, attempt)
+}
+
+func (s *Server) publishRequestCreated(req store.CapturedRequest) {
+	payload := map[string]any{
+		"id":                  req.ID,
+		"method":              req.Method,
+		"path":                req.Path,
+		"query_string":        req.QueryString,
+		"provider_hint":       req.ProviderHint,
+		"forward_status":      req.ForwardStatus,
+		"forward_status_code": req.ForwardStatusCode,
+		"received_at":         req.ReceivedAt,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	s.broker.Publish(stream.Event{
+		Type: "request.created",
+		Data: data,
+	})
+}
+
+func writeSSE(w io.Writer, event stream.Event) {
+	_, _ = io.WriteString(w, "event: "+event.Type+"\n")
+	for _, line := range strings.Split(string(event.Data), "\n") {
+		_, _ = io.WriteString(w, "data: "+line+"\n")
+	}
+	_, _ = io.WriteString(w, "\n")
+}
+
 func headerMap(headers http.Header) map[string][]string {
 	out := make(map[string][]string, len(headers))
 	for key, values := range headers {
@@ -197,12 +333,30 @@ func headerMap(headers http.Header) map[string][]string {
 	return out
 }
 
+func headersFromJSON(headersJSON string) (http.Header, error) {
+	var values map[string][]string
+	if err := json.Unmarshal([]byte(headersJSON), &values); err != nil {
+		return nil, err
+	}
+	headers := make(http.Header, len(values))
+	for key, headerValues := range values {
+		for _, value := range headerValues {
+			headers.Add(key, value)
+		}
+	}
+	return headers, nil
+}
+
 func newRequestID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "req_" + strings.ReplaceAll(time.Now().UTC().Format(time.RFC3339Nano), ":", "")
 	}
 	return "req_" + hex.EncodeToString(b[:])
+}
+
+func newReplayAttemptID() string {
+	return strings.Replace(newRequestID(), "req_", "rep_", 1)
 }
 
 func stringPtrOrNil(value string) *string {
