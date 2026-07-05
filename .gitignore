@@ -1,0 +1,15 @@
+.gocache/
+.gomodcache/
+.gotelemetry/
+hookstash.db
+*.db
+*.db-shm
+*.db-wal
+web/node_modules/
+web/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.env
+.env.*
+.tmp-*.png
