@@ -383,6 +383,177 @@ func TestReplayCapturedRequestSuccess(t *testing.T) {
 	}
 }
 
+func TestReplayUsesEditedBody(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	var gotBody string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	handler := New(Config{Store: db})
+	captureReq := httptest.NewRequest(http.MethodPost, "/hooks/default", strings.NewReader(`{"event":"original"}`))
+	captureReq.Header.Set("Content-Type", "application/json")
+	captureRec := httptest.NewRecorder()
+	handler.ServeHTTP(captureRec, captureReq)
+	if captureRec.Code != http.StatusAccepted {
+		t.Fatalf("capture status = %d", captureRec.Code)
+	}
+
+	var captureResponse struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(captureRec.Body).Decode(&captureResponse); err != nil {
+		t.Fatalf("decode capture response: %v", err)
+	}
+
+	replayPayload := `{"target_url":"` + target.URL + `","body":"{\"event\":\"edited\"}"}`
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/requests/"+captureResponse.ID+"/replay", strings.NewReader(replayPayload))
+	replayRec := httptest.NewRecorder()
+	handler.ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusOK {
+		t.Fatalf("replay status = %d; body %s", replayRec.Code, replayRec.Body.String())
+	}
+
+	if gotBody != `{"event":"edited"}` {
+		t.Fatalf("replayed body = %q, want edited body", gotBody)
+	}
+	attempts, err := db.ListReplayAttempts(replayReq.Context(), captureResponse.ID)
+	if err != nil {
+		t.Fatalf("list replay attempts: %v", err)
+	}
+	if len(attempts) != 1 || string(attempts[0].EditedBody) != `{"event":"edited"}` {
+		t.Fatalf("stored edited body = %+v", attempts)
+	}
+}
+
+func TestReplayAppliesEditedHeaders(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	var gotContentType string
+	var gotOriginalHeader string
+	var gotReplayHeader string
+	var gotHost string
+	var gotConnection string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+		gotOriginalHeader = r.Header.Get("X-Original")
+		gotReplayHeader = r.Header.Get("X-Replay")
+		gotHost = r.Host
+		gotConnection = r.Header.Get("Connection")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	handler := New(Config{Store: db})
+	captureReq := httptest.NewRequest(http.MethodPost, "/hooks/default", strings.NewReader(`{"ok":true}`))
+	captureReq.Header.Set("Content-Type", "application/json")
+	captureReq.Header.Set("X-Original", "kept")
+	captureRec := httptest.NewRecorder()
+	handler.ServeHTTP(captureRec, captureReq)
+	if captureRec.Code != http.StatusAccepted {
+		t.Fatalf("capture status = %d", captureRec.Code)
+	}
+
+	var captureResponse struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(captureRec.Body).Decode(&captureResponse); err != nil {
+		t.Fatalf("decode capture response: %v", err)
+	}
+
+	replayPayload := `{
+		"target_url":"` + target.URL + `",
+		"headers":{
+			"Content-Type":"application/vnd.hookstash+json",
+			"X-Replay":["yes"],
+			"Connection":"close",
+			"Host":"evil.example"
+		}
+	}`
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/requests/"+captureResponse.ID+"/replay", strings.NewReader(replayPayload))
+	replayRec := httptest.NewRecorder()
+	handler.ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusOK {
+		t.Fatalf("replay status = %d; body %s", replayRec.Code, replayRec.Body.String())
+	}
+
+	if gotContentType != "application/vnd.hookstash+json" {
+		t.Fatalf("content type = %q", gotContentType)
+	}
+	if gotOriginalHeader != "kept" {
+		t.Fatalf("original header = %q", gotOriginalHeader)
+	}
+	if gotReplayHeader != "yes" {
+		t.Fatalf("replay header = %q", gotReplayHeader)
+	}
+	if gotConnection != "" {
+		t.Fatalf("connection header was replayed: %q", gotConnection)
+	}
+	if gotHost == "evil.example" {
+		t.Fatalf("host override was replayed")
+	}
+
+	attempts, err := db.ListReplayAttempts(replayReq.Context(), captureResponse.ID)
+	if err != nil {
+		t.Fatalf("list replay attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].EditedHeadersJSON == nil || !strings.Contains(*attempts[0].EditedHeadersJSON, "X-Replay") {
+		t.Fatalf("edited headers were not stored: %+v", attempts[0].EditedHeadersJSON)
+	}
+}
+
+func TestReplayRejectsInvalidEditedHeaders(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+	captureReq := httptest.NewRequest(http.MethodPost, "/hooks/default", strings.NewReader(`{"ok":true}`))
+	captureRec := httptest.NewRecorder()
+	handler.ServeHTTP(captureRec, captureReq)
+	if captureRec.Code != http.StatusAccepted {
+		t.Fatalf("capture status = %d", captureRec.Code)
+	}
+
+	var captureResponse struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(captureRec.Body).Decode(&captureResponse); err != nil {
+		t.Fatalf("decode capture response: %v", err)
+	}
+
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/requests/"+captureResponse.ID+"/replay", strings.NewReader(`{
+		"target_url":"http://127.0.0.1:8000/webhooks",
+		"headers":{"X-Bad":123}
+	}`))
+	replayRec := httptest.NewRecorder()
+	handler.ServeHTTP(replayRec, replayReq)
+
+	if replayRec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body %s", replayRec.Code, replayRec.Body.String())
+	}
+	if !strings.Contains(replayRec.Body.String(), "headers must be a JSON object") {
+		t.Fatalf("body = %q", replayRec.Body.String())
+	}
+}
+
 func TestReplayRequiresTargetURL(t *testing.T) {
 	db, err := store.Open(":memory:")
 	if err != nil {

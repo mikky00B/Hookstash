@@ -237,7 +237,9 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReplayRequest(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		TargetURL string `json:"target_url"`
+		TargetURL string           `json:"target_url"`
+		Body      *string          `json:"body"`
+		Headers   *json.RawMessage `json:"headers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid replay payload")
@@ -264,9 +266,30 @@ func (s *Server) handleReplayRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load request headers")
 		return
 	}
+	var editedHeadersJSON *string
+	if payload.Headers != nil {
+		overrides, normalized, err := replayHeaderOverrides(*payload.Headers)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "headers must be a JSON object with string or string array values")
+			return
+		}
+		for key, values := range overrides {
+			headers.Del(key)
+			for _, value := range values {
+				headers.Add(key, value)
+			}
+		}
+		editedHeadersJSON = &normalized
+	}
+
 	body := req.Body
 	if body == nil {
 		body = []byte(req.BodyText)
+	}
+	var editedBody []byte
+	if payload.Body != nil {
+		editedBody = []byte(*payload.Body)
+		body = editedBody
 	}
 
 	result := s.replayer.Replay(r.Context(), capture.ReplayRequest{
@@ -277,14 +300,16 @@ func (s *Server) handleReplayRequest(w http.ResponseWriter, r *http.Request) {
 	})
 
 	attempt := store.ReplayAttempt{
-		ID:           newReplayAttemptID(),
-		RequestID:    req.ID,
-		TargetURL:    payload.TargetURL,
-		StatusCode:   result.StatusCode,
-		ResponseBody: result.ResponseBody,
-		Error:        result.Error,
-		DurationMS:   result.DurationMS,
-		CreatedAt:    time.Now().UTC(),
+		ID:                newReplayAttemptID(),
+		RequestID:         req.ID,
+		TargetURL:         payload.TargetURL,
+		EditedBody:        editedBody,
+		EditedHeadersJSON: editedHeadersJSON,
+		StatusCode:        result.StatusCode,
+		ResponseBody:      result.ResponseBody,
+		Error:             result.Error,
+		DurationMS:        result.DurationMS,
+		CreatedAt:         time.Now().UTC(),
 	}
 	if err := s.store.CreateReplayAttempt(r.Context(), attempt); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not save replay attempt")
@@ -345,6 +370,40 @@ func headersFromJSON(headersJSON string) (http.Header, error) {
 		}
 	}
 	return headers, nil
+}
+
+func replayHeaderOverrides(raw json.RawMessage) (http.Header, string, error) {
+	var values map[string]any
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, "", err
+	}
+	headers := make(http.Header, len(values))
+	normalized := make(map[string][]string, len(values))
+	for key, value := range values {
+		switch typed := value.(type) {
+		case string:
+			headers.Set(key, typed)
+			normalized[key] = []string{typed}
+		case []any:
+			headerValues := make([]string, 0, len(typed))
+			for _, item := range typed {
+				text, ok := item.(string)
+				if !ok {
+					return nil, "", errors.New("header array values must be strings")
+				}
+				headerValues = append(headerValues, text)
+				headers.Add(key, text)
+			}
+			normalized[key] = headerValues
+		default:
+			return nil, "", errors.New("header values must be strings or string arrays")
+		}
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, "", err
+	}
+	return headers, string(encoded), nil
 }
 
 func newRequestID() string {
