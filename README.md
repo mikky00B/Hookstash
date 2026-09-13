@@ -12,7 +12,7 @@ Hookstash is early. The current build includes:
 
 - Local HTTP server
 - SQLite request storage
-- Webhook capture at `/hooks/default`
+- Named capture endpoints at `/hooks/{slug}` with optional capture tokens
 - Request listing and detail APIs
 - Optional forwarding to a local target
 - Queued status when forwarding fails
@@ -20,6 +20,10 @@ Hookstash is early. The current build includes:
 - Local dashboard for browsing captured requests
 - Realtime dashboard refresh with Server-Sent Events
 - Replay captured requests to a target URL
+
+In progress on the v2 branch (see `docs/v2-plan.md`): public URLs via wrapped
+Cloudflare quick tunnels, signature verification and re-signing on replay, and
+request exports.
 
 Replay editing, retry controls, and cURL export are planned next.
 
@@ -50,6 +54,23 @@ List captured requests:
 ```bash
 curl http://127.0.0.1:4040/api/requests
 ```
+
+### Multiple capture endpoints
+
+Create named endpoints so different providers land in different buckets:
+
+```bash
+hookstash endpoint add payments --token
+hookstash endpoint list
+hookstash endpoint rm payments
+```
+
+Capture then goes to `/hooks/payments`. With a token, requests must send
+`Authorization: Bearer <token>` (or `?token=<token>`). Endpoints can also be
+created from the dashboard or via the API (see below).
+
+The dashboard filters captured requests by endpoint and shows the one-time
+capture token when an endpoint is created there.
 
 The dashboard fetches captured requests from `GET /api/requests` and shows request details, headers, body, provider hints, and forwarding results. It also listens to `GET /api/events` so new captures appear without refreshing the page.
 
@@ -94,6 +115,14 @@ Hookstash does not provide a public tunnel. Use a tool like ngrok or Cloudflare 
 --log-level   Log level. Default: info
 ```
 
+Endpoint management subcommands (see above):
+
+```txt
+hookstash endpoint add <name> [--token] [--provider <name>]
+hookstash endpoint list
+hookstash endpoint rm <name>
+```
+
 Environment variables:
 
 ```txt
@@ -130,6 +159,43 @@ Get one captured request:
 
 ```txt
 GET /api/requests/{id}
+```
+
+List endpoints:
+
+```txt
+GET /api/endpoints
+```
+
+Create an endpoint:
+
+```txt
+POST /api/endpoints
+```
+
+Payload:
+
+```json
+{
+  "slug": "payments",
+  "with_token": true,
+  "provider": "stripe"
+}
+```
+
+The capture token, if generated, is returned once in the response as `token`.
+Only its hash is stored.
+
+Delete an endpoint (the built-in `default` cannot be deleted):
+
+```txt
+DELETE /api/endpoints/{id}
+```
+
+Filter captured requests by endpoint slug:
+
+```txt
+GET /api/requests?endpoint=payments
 ```
 
 Subscribe to dashboard events:

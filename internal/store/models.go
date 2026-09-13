@@ -19,6 +19,15 @@ type CapturedRequest struct {
 	ForwardError      *string   `json:"forward_error"`
 	ForwardDurationMS *int64    `json:"forward_duration_ms"`
 	TargetURL         *string   `json:"target_url"`
+	EndpointID        string    `json:"endpoint_id"`
+}
+
+type Endpoint struct {
+	ID        string    `json:"id"`
+	Slug      string    `json:"slug"`
+	TokenHash string    `json:"-"`
+	Provider  string    `json:"provider"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type ReplayAttempt struct {

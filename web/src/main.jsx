@@ -2,17 +2,31 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const webhookEndpoint = `${window.location.origin}/hooks/default`;
-const SAMPLE_CURL = `curl -X POST ${webhookEndpoint} \\
+const SAMPLE_CURL = `curl -X POST <your-capture-url> \\
   -H "Content-Type: application/json" \\
   -d '{"event":"charge.success","amount":5000}'`;
 
 function App() {
   const [requests, setRequests] = useState([]);
+  const [endpoints, setEndpoints] = useState([]);
+  const [activeEndpoint, setActiveEndpoint] = useState("all");
   const [selectedID, setSelectedID] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [liveStatus, setLiveStatus] = useState("Offline");
+
+  const loadEndpoints = useCallback(async () => {
+    try {
+      const response = await fetch("/api/endpoints");
+      if (!response.ok) {
+        throw new Error(`Request failed with ${response.status}`);
+      }
+      const data = await response.json();
+      setEndpoints(Array.isArray(data.endpoints) ? data.endpoints : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load endpoints");
+    }
+  }, []);
 
   const loadRequests = useCallback(
     async ({ showLoading = false } = {}) => {
@@ -20,14 +34,21 @@ function App() {
         setLoading(true);
       }
       try {
-        const response = await fetch("/api/requests");
+        const url =
+          activeEndpoint === "all"
+            ? "/api/requests"
+            : `/api/requests?endpoint=${encodeURIComponent(activeEndpoint)}`;
+        const response = await fetch(url);
         if (!response.ok) {
-          throw new Error(`Request failed with ${response.status}`);
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || `Request failed with ${response.status}`);
         }
         const data = await response.json();
         const nextRequests = Array.isArray(data.requests) ? data.requests : [];
         setRequests(nextRequests);
-        setSelectedID((current) => current ?? nextRequests[0]?.id ?? null);
+        setSelectedID((current) =>
+          nextRequests.some((request) => request.id === current) ? current : nextRequests[0]?.id ?? null
+        );
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load requests");
@@ -35,8 +56,12 @@ function App() {
         setLoading(false);
       }
     },
-    []
+    [activeEndpoint]
   );
+
+  useEffect(() => {
+    loadEndpoints();
+  }, [loadEndpoints]);
 
   useEffect(() => {
     loadRequests({ showLoading: true });
@@ -73,6 +98,18 @@ function App() {
     [requests, selectedID]
   );
 
+  const endpointSlugs = useMemo(() => {
+    const slugs = {};
+    for (const endpoint of endpoints) {
+      slugs[endpoint.id] = endpoint.slug;
+    }
+    return slugs;
+  }, [endpoints]);
+
+  const captureURL = `${window.location.origin}/hooks/${
+    activeEndpoint === "all" ? "default" : activeEndpoint
+  }`;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -81,25 +118,143 @@ function App() {
           <h1>Hookstash</h1>
         </div>
         <div className="endpoint-card">
-          <span>Webhook endpoint</span>
-          <code>{webhookEndpoint}</code>
+          <span>Capture URL {activeEndpoint !== "all" ? `· /hooks/${activeEndpoint}` : ""}</span>
+          <code>{captureURL}</code>
         </div>
         <LiveIndicator status={liveStatus} />
       </header>
 
       {error && <div className="alert">Could not load captured requests: {error}</div>}
 
+      <EndpointBar
+        endpoints={endpoints}
+        activeEndpoint={activeEndpoint}
+        onSelect={setActiveEndpoint}
+        onChanged={loadEndpoints}
+      />
+
       {loading ? (
         <div className="panel loading-panel">Loading captured requests...</div>
       ) : requests.length === 0 ? (
-        <EmptyState />
+        <EmptyState captureURL={captureURL} />
       ) : (
         <section className="dashboard-grid">
-          <RequestList requests={requests} selectedID={selected?.id} onSelect={setSelectedID} />
-          <RequestDetail request={selected} />
+          <RequestList
+            requests={requests}
+            selectedID={selected?.id}
+            onSelect={setSelectedID}
+            endpointSlugs={endpointSlugs}
+          />
+          <RequestDetail request={selected} endpointSlug={endpointSlugs[selected?.endpoint_id] || "unknown"} />
         </section>
       )}
     </main>
+  );
+}
+
+function EndpointBar({ endpoints, activeEndpoint, onSelect, onChanged }) {
+  const [creating, setCreating] = useState(false);
+  const [slug, setSlug] = useState("");
+  const [withToken, setWithToken] = useState(false);
+  const [createdToken, setCreatedToken] = useState("");
+  const [createError, setCreateError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function createEndpoint(event) {
+    event.preventDefault();
+    setCreateError("");
+    setCreatedToken("");
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/endpoints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, with_token: withToken })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `Create failed with ${response.status}`);
+      }
+      setCreatedToken(data.token || "");
+      setSlug("");
+      setWithToken(false);
+      await onChanged();
+      onSelect(data.endpoint?.slug || slug);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Could not create endpoint");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="panel endpoint-bar" aria-label="Endpoints">
+      <div className="endpoint-chips">
+        <button
+          type="button"
+          className={`chip ${activeEndpoint === "all" ? "chip-active" : ""}`}
+          onClick={() => onSelect("all")}
+        >
+          All endpoints
+        </button>
+        {endpoints.map((endpoint) => (
+          <button
+            type="button"
+            key={endpoint.id}
+            className={`chip ${activeEndpoint === endpoint.slug ? "chip-active" : ""}`}
+            onClick={() => onSelect(endpoint.slug)}
+            title={endpoint.token_hash ? "Token required" : endpoint.provider || undefined}
+          >
+            /{endpoint.slug}
+          </button>
+        ))}
+        <button type="button" className="chip chip-new" onClick={() => setCreating((value) => !value)}>
+          {creating ? "Cancel" : "+ New endpoint"}
+        </button>
+      </div>
+
+      {creating && (
+        <form className="endpoint-form" onSubmit={createEndpoint}>
+          <label>
+            <span>Name</span>
+            <input
+              type="text"
+              value={slug}
+              onChange={(event) => setSlug(event.target.value)}
+              placeholder="payments"
+              pattern="[A-Za-z0-9_-]+"
+              required
+            />
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={withToken}
+              onChange={(event) => setWithToken(event.target.checked)}
+            />
+            <span>Require capture token</span>
+          </label>
+          <button type="submit" disabled={submitting}>
+            {submitting ? "Creating..." : "Create endpoint"}
+          </button>
+        </form>
+      )}
+
+      {createError && <div className="alert">{createError}</div>}
+
+      {createdToken && (
+        <div className="token-alert">
+          <strong>Capture token (shown once — copy it now)</strong>
+          <code>{createdToken}</code>
+          <button
+            type="button"
+            onClick={() => navigator.clipboard?.writeText(createdToken).catch(() => {})}
+          >
+            Copy
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -112,7 +267,8 @@ function LiveIndicator({ status }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ captureURL }) {
+  const sample = SAMPLE_CURL.replace("<your-capture-url>", captureURL);
   return (
     <section className="empty-state">
       <div>
@@ -123,12 +279,12 @@ function EmptyState() {
           status.
         </p>
       </div>
-      <pre><code>{SAMPLE_CURL}</code></pre>
+      <pre><code>{sample}</code></pre>
     </section>
   );
 }
 
-function RequestList({ requests, selectedID, onSelect }) {
+function RequestList({ requests, selectedID, onSelect, endpointSlugs }) {
   return (
     <aside className="panel request-list" aria-label="Captured requests">
       <div className="panel-heading">
@@ -151,7 +307,7 @@ function RequestList({ requests, selectedID, onSelect }) {
               <small>{formatDate(request.received_at)}</small>
             </span>
             <span className="request-meta">
-              <Badge value={request.provider_hint || "unknown"} />
+              <Badge value={endpointSlugs?.[request.endpoint_id] || request.provider_hint || "unknown"} />
               <ForwardStatus request={request} />
             </span>
           </button>
@@ -161,7 +317,7 @@ function RequestList({ requests, selectedID, onSelect }) {
   );
 }
 
-function RequestDetail({ request }) {
+function RequestDetail({ request, endpointSlug }) {
   const [targetURL, setTargetURL] = useState("");
   const [replayResult, setReplayResult] = useState(null);
   const [replayError, setReplayError] = useState("");
@@ -217,6 +373,7 @@ function RequestDetail({ request }) {
       </div>
 
       <dl className="summary-grid">
+        <Info label="Endpoint" value={endpointSlug || "unknown"} />
         <Info label="Content type" value={request.content_type || "not provided"} />
         <Info label="Provider" value={request.provider_hint || "unknown"} />
         <Info label="Forward status" value={request.forward_status || "unknown"} />

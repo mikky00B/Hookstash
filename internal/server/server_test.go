@@ -13,6 +13,226 @@ import (
 	"github.com/hookstash/hookstash/internal/store"
 )
 
+func TestCaptureUnknownEndpointReturnsNotFound(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+	req := httptest.NewRequest(http.MethodPost, "/hooks/doesnotexist", strings.NewReader(`{"ok":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown endpoint") {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestCaptureToCustomEndpointAndFilterList(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/endpoints", strings.NewReader(`{"slug":"Payments"}`))
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create endpoint status = %d; body %s", createRec.Code, createRec.Body.String())
+	}
+	var createResponse struct {
+		Endpoint store.Endpoint `json:"endpoint"`
+	}
+	if err := json.NewDecoder(createRec.Body).Decode(&createResponse); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if createResponse.Endpoint.Slug != "payments" {
+		t.Fatalf("slug = %q, want normalized payments", createResponse.Endpoint.Slug)
+	}
+
+	captureReq := httptest.NewRequest(http.MethodPost, "/hooks/payments", strings.NewReader(`{"event":"charge.success"}`))
+	captureRec := httptest.NewRecorder()
+	handler.ServeHTTP(captureRec, captureReq)
+	if captureRec.Code != http.StatusAccepted {
+		t.Fatalf("capture status = %d; body %s", captureRec.Code, captureRec.Body.String())
+	}
+	var captureResponse struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := json.NewDecoder(captureRec.Body).Decode(&captureResponse); err != nil {
+		t.Fatalf("decode capture response: %v", err)
+	}
+	if captureResponse.Endpoint != "payments" {
+		t.Fatalf("capture endpoint = %q, want payments", captureResponse.Endpoint)
+	}
+
+	// Capture on the default endpoint too, so filtering is observable.
+	otherReq := httptest.NewRequest(http.MethodPost, "/hooks/default", strings.NewReader(`{"event":"other"}`))
+	otherRec := httptest.NewRecorder()
+	handler.ServeHTTP(otherRec, otherReq)
+	if otherRec.Code != http.StatusAccepted {
+		t.Fatalf("default capture status = %d", otherRec.Code)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/requests?endpoint=payments", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", listRec.Code)
+	}
+	var listResponse struct {
+		Requests []store.CapturedRequest `json:"requests"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&listResponse); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResponse.Requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(listResponse.Requests))
+	}
+	if listResponse.Requests[0].EndpointID != createResponse.Endpoint.ID {
+		t.Fatalf("endpoint id = %q, want %q", listResponse.Requests[0].EndpointID, createResponse.Endpoint.ID)
+	}
+
+	filteredReq := httptest.NewRequest(http.MethodGet, "/api/requests?endpoint=missing", nil)
+	filteredRec := httptest.NewRecorder()
+	handler.ServeHTTP(filteredRec, filteredReq)
+	if filteredRec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown endpoint filter status = %d, want 400", filteredRec.Code)
+	}
+}
+
+func TestCaptureTokenAuth(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/endpoints", strings.NewReader(`{"slug":"secure","with_token":true}`))
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create endpoint status = %d", createRec.Code)
+	}
+	var createResponse struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(createRec.Body).Decode(&createResponse); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if createResponse.Token == "" {
+		t.Fatalf("expected a one-time token in the create response")
+	}
+
+	unauthorized := httptest.NewRequest(http.MethodPost, "/hooks/secure", strings.NewReader(`{"ok":true}`))
+	unauthorizedRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedRec, unauthorized)
+	if unauthorizedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("status without token = %d, want 401", unauthorizedRec.Code)
+	}
+
+	wrongToken := httptest.NewRequest(http.MethodPost, "/hooks/secure?token=hs_wrong", strings.NewReader(`{"ok":true}`))
+	wrongRec := httptest.NewRecorder()
+	handler.ServeHTTP(wrongRec, wrongToken)
+	if wrongRec.Code != http.StatusUnauthorized {
+		t.Fatalf("status with wrong token = %d, want 401", wrongRec.Code)
+	}
+
+	bearerReq := httptest.NewRequest(http.MethodPost, "/hooks/secure", strings.NewReader(`{"ok":true}`))
+	bearerReq.Header.Set("Authorization", "Bearer "+createResponse.Token)
+	bearerRec := httptest.NewRecorder()
+	handler.ServeHTTP(bearerRec, bearerReq)
+	if bearerRec.Code != http.StatusAccepted {
+		t.Fatalf("status with bearer token = %d; body %s", bearerRec.Code, bearerRec.Body.String())
+	}
+
+	queryReq := httptest.NewRequest(http.MethodPost, "/hooks/secure?token="+createResponse.Token, strings.NewReader(`{"ok":true}`))
+	queryRec := httptest.NewRecorder()
+	handler.ServeHTTP(queryRec, queryReq)
+	if queryRec.Code != http.StatusAccepted {
+		t.Fatalf("status with query token = %d", queryRec.Code)
+	}
+}
+
+func TestCreateEndpointValidation(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+
+	cases := []struct {
+		name    string
+		payload string
+		status  int
+	}{
+		{"empty slug", `{"slug":""}`, http.StatusBadRequest},
+		{"bad characters", `{"slug":"Pay ments!"}`, http.StatusBadRequest},
+		{"duplicate", `{"slug":"default"}`, http.StatusConflict},
+	}
+	for _, testCase := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/endpoints", strings.NewReader(testCase.payload))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != testCase.status {
+			t.Fatalf("%s: status = %d, want %d; body %s", testCase.name, rec.Code, testCase.status, rec.Body.String())
+		}
+	}
+}
+
+func TestDeleteEndpointRules(t *testing.T) {
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	handler := New(Config{Store: db})
+
+	defaultReq := httptest.NewRequest(http.MethodDelete, "/api/endpoints/ep_default", nil)
+	defaultRec := httptest.NewRecorder()
+	handler.ServeHTTP(defaultRec, defaultReq)
+	if defaultRec.Code != http.StatusBadRequest {
+		t.Fatalf("delete default status = %d, want 400", defaultRec.Code)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/endpoints", strings.NewReader(`{"slug":"temp"}`))
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	var createResponse struct {
+		Endpoint store.Endpoint `json:"endpoint"`
+	}
+	if err := json.NewDecoder(createRec.Body).Decode(&createResponse); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/endpoints/"+createResponse.Endpoint.ID, nil)
+	deleteRec := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d", deleteRec.Code)
+	}
+
+	missingReq := httptest.NewRequest(http.MethodDelete, "/api/endpoints/"+createResponse.Endpoint.ID, nil)
+	missingRec := httptest.NewRecorder()
+	handler.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("second delete status = %d, want 404", missingRec.Code)
+	}
+}
+
 func TestCaptureStoresRequestBeforeReturning(t *testing.T) {
 	db, err := store.Open(":memory:")
 	if err != nil {

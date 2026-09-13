@@ -20,10 +20,14 @@ import (
 
 type Store interface {
 	CreateRequest(ctx context.Context, req store.CapturedRequest) error
-	ListRequests(ctx context.Context) ([]store.CapturedRequest, error)
+	ListRequests(ctx context.Context, endpointID string) ([]store.CapturedRequest, error)
 	GetRequest(ctx context.Context, id string) (store.CapturedRequest, error)
 	UpdateForwardResult(ctx context.Context, id string, status string, statusCode *int, forwardError *string, durationMS int64, targetURL string) error
 	CreateReplayAttempt(ctx context.Context, attempt store.ReplayAttempt) error
+	CreateEndpoint(ctx context.Context, endpoint store.Endpoint) error
+	ListEndpoints(ctx context.Context) ([]store.Endpoint, error)
+	GetEndpointBySlug(ctx context.Context, slug string) (store.Endpoint, error)
+	DeleteEndpoint(ctx context.Context, id string) error
 }
 
 type Config struct {
@@ -63,7 +67,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/requests", s.handleListRequests)
 	s.mux.HandleFunc("GET /api/requests/{id}", s.handleGetRequest)
 	s.mux.HandleFunc("POST /api/requests/{id}/replay", s.handleReplayRequest)
-	s.mux.HandleFunc("/hooks/default", s.handleCapture)
+	s.mux.HandleFunc("POST /api/endpoints", s.handleCreateEndpoint)
+	s.mux.HandleFunc("GET /api/endpoints", s.handleListEndpoints)
+	s.mux.HandleFunc("DELETE /api/endpoints/{id}", s.handleDeleteEndpoint)
+	s.mux.HandleFunc("/hooks/{slug}", s.handleCapture)
 	s.mux.HandleFunc("/", s.handleDashboard)
 }
 
@@ -97,8 +104,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/hooks/default" {
-		http.NotFound(w, r)
+	endpoint, ok := s.authorizeEndpoint(w, r)
+	if !ok {
 		return
 	}
 
@@ -135,6 +142,7 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		ProviderHint:  capture.ProviderHint(r.Header, r.URL.Path),
 		ForwardStatus: forwardStatus,
 		TargetURL:     targetURL,
+		EndpointID:    endpoint.ID,
 	}
 
 	if err := s.store.CreateRequest(r.Context(), req); err != nil {
@@ -167,9 +175,124 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":             req.ID,
 		"captured":       true,
+		"endpoint":       endpoint.Slug,
 		"forward_status": req.ForwardStatus,
 		"forward_error":  req.ForwardError,
 	})
+}
+
+// authorizeEndpoint resolves the {slug} path value to an endpoint and enforces
+// its capture token, if one is configured.
+func (s *Server) authorizeEndpoint(w http.ResponseWriter, r *http.Request) (store.Endpoint, bool) {
+	slug := strings.ToLower(r.PathValue("slug"))
+	endpoint, err := s.store.GetEndpointBySlug(r.Context(), slug)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown endpoint: "+slug)
+		return store.Endpoint{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load endpoint")
+		return store.Endpoint{}, false
+	}
+
+	if endpoint.TokenHash != "" {
+		token := r.URL.Query().Get("token")
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			if bearer, found := strings.CutPrefix(auth, "Bearer "); found {
+				token = strings.TrimSpace(bearer)
+			}
+		}
+		if token == "" || store.HashToken(token) != endpoint.TokenHash {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="hookstash"`)
+			writeError(w, http.StatusUnauthorized, "invalid or missing capture token")
+			return store.Endpoint{}, false
+		}
+	}
+
+	return endpoint, true
+}
+
+func (s *Server) handleCreateEndpoint(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Slug      string `json:"slug"`
+		Provider  string `json:"provider"`
+		WithToken bool   `json:"with_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid endpoint payload")
+		return
+	}
+
+	slug, err := store.NormalizeSlug(payload.Slug)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.store.GetEndpointBySlug(r.Context(), slug); err == nil {
+		writeError(w, http.StatusConflict, "endpoint already exists: "+slug)
+		return
+	}
+
+	endpoint := store.Endpoint{
+		ID:        store.NewEndpointID(),
+		Slug:      slug,
+		Provider:  strings.TrimSpace(payload.Provider),
+		CreatedAt: time.Now().UTC(),
+	}
+
+	var response map[string]any
+	if payload.WithToken {
+		token, tokenHash, err := store.GenerateToken()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not generate capture token")
+			return
+		}
+		endpoint.TokenHash = tokenHash
+		response = map[string]any{
+			"endpoint": endpoint,
+			"token":    token,
+		}
+	} else {
+		response = map[string]any{
+			"endpoint": endpoint,
+		}
+	}
+
+	if err := s.store.CreateEndpoint(r.Context(), endpoint); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create endpoint")
+		return
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
+	endpoints, err := s.store.ListEndpoints(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list endpoints")
+		return
+	}
+	if endpoints == nil {
+		endpoints = []store.Endpoint{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"endpoints": endpoints,
+	})
+}
+
+func (s *Server) handleDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "ep_default" {
+		writeError(w, http.StatusBadRequest, "the default endpoint cannot be deleted")
+		return
+	}
+	if err := s.store.DeleteEndpoint(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "endpoint not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete endpoint")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +334,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
-	requests, err := s.store.ListRequests(r.Context())
+	endpointID := ""
+	if slug := strings.TrimSpace(r.URL.Query().Get("endpoint")); slug != "" {
+		endpoint, err := s.store.GetEndpointBySlug(r.Context(), strings.ToLower(slug))
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "unknown endpoint: "+slug)
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not load endpoint")
+			return
+		}
+		endpointID = endpoint.ID
+	}
+
+	requests, err := s.store.ListRequests(r.Context(), endpointID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list requests")
 		return
@@ -328,6 +465,7 @@ func (s *Server) publishRequestCreated(req store.CapturedRequest) {
 		"provider_hint":       req.ProviderHint,
 		"forward_status":      req.ForwardStatus,
 		"forward_status_code": req.ForwardStatusCode,
+		"endpoint_id":         req.EndpointID,
 		"received_at":         req.ReceivedAt,
 	}
 	data, err := json.Marshal(payload)
