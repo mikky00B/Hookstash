@@ -16,6 +16,7 @@ import (
 	"github.com/hookstash/hookstash/internal/capture"
 	"github.com/hookstash/hookstash/internal/store"
 	"github.com/hookstash/hookstash/internal/stream"
+	"github.com/hookstash/hookstash/internal/tunnel"
 )
 
 type Store interface {
@@ -33,6 +34,8 @@ type Store interface {
 type Config struct {
 	Store      Store
 	ForwardURL string
+	Tunnel     *tunnel.Manager
+	Broker     *stream.Broker
 }
 
 type Server struct {
@@ -41,16 +44,22 @@ type Server struct {
 	forwarder  capture.Forwarder
 	replayer   capture.Replayer
 	broker     *stream.Broker
+	tunnel     *tunnel.Manager
 	mux        *http.ServeMux
 }
 
 func New(cfg Config) http.Handler {
+	broker := cfg.Broker
+	if broker == nil {
+		broker = stream.NewBroker()
+	}
 	s := &Server{
 		store:      cfg.Store,
 		forwardURL: cfg.ForwardURL,
 		forwarder:  capture.NewForwarder(nil),
 		replayer:   capture.NewReplayer(nil),
-		broker:     stream.NewBroker(),
+		broker:     broker,
+		tunnel:     cfg.Tunnel,
 		mux:        http.NewServeMux(),
 	}
 	s.routes()
@@ -70,6 +79,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/endpoints", s.handleCreateEndpoint)
 	s.mux.HandleFunc("GET /api/endpoints", s.handleListEndpoints)
 	s.mux.HandleFunc("DELETE /api/endpoints/{id}", s.handleDeleteEndpoint)
+	s.mux.HandleFunc("GET /api/tunnel", s.handleTunnelStatus)
+	s.mux.HandleFunc("POST /api/tunnel/start", s.handleTunnelStart)
+	s.mux.HandleFunc("POST /api/tunnel/stop", s.handleTunnelStop)
 	s.mux.HandleFunc("/hooks/{slug}", s.handleCapture)
 	s.mux.HandleFunc("/", s.handleDashboard)
 }
@@ -210,6 +222,31 @@ func (s *Server) authorizeEndpoint(w http.ResponseWriter, r *http.Request) (stor
 	}
 
 	return endpoint, true
+}
+
+func (s *Server) handleTunnelStatus(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		writeJSON(w, http.StatusOK, tunnel.Status{State: tunnel.StateDisabled})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.tunnel.Status())
+}
+
+func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		writeError(w, http.StatusBadRequest, "tunnel support is not configured")
+		return
+	}
+	status := s.tunnel.Start()
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		writeError(w, http.StatusBadRequest, "tunnel support is not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.tunnel.Stop())
 }
 
 func (s *Server) handleCreateEndpoint(w http.ResponseWriter, r *http.Request) {

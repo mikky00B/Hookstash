@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +16,8 @@ import (
 	"github.com/hookstash/hookstash/internal/config"
 	"github.com/hookstash/hookstash/internal/server"
 	"github.com/hookstash/hookstash/internal/store"
+	"github.com/hookstash/hookstash/internal/stream"
+	"github.com/hookstash/hookstash/internal/tunnel"
 )
 
 func main() {
@@ -32,6 +34,8 @@ func main() {
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database path")
 	flag.BoolVar(&cfg.OpenBrowser, "open", cfg.OpenBrowser, "open dashboard in the default browser")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level")
+	flag.BoolVar(&cfg.Public, "public", cfg.Public, "expose a public URL via a cloudflared quick tunnel")
+	flag.StringVar(&cfg.TunnelURL, "tunnel-url", cfg.TunnelURL, "display a tunnel URL you manage yourself instead of starting one")
 	flag.Parse()
 
 	db, err := store.Open(cfg.DBPath)
@@ -40,9 +44,23 @@ func main() {
 	}
 	defer db.Close()
 
+	broker := stream.NewBroker()
+	tunnelManager := tunnel.NewManager(tunnel.Config{
+		TargetURL:   fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port),
+		ExternalURL: cfg.TunnelURL,
+		OnEvent: func(event string, status tunnel.Status) {
+			log.Printf("tunnel: %s (state=%s url=%s error=%q)", event, status.State, status.URL, status.Error)
+			if data, err := json.Marshal(status); err == nil {
+				broker.Publish(stream.Event{Type: event, Data: data})
+			}
+		},
+	})
+
 	handler := server.New(server.Config{
 		Store:      db,
 		ForwardURL: cfg.ForwardURL,
+		Tunnel:     tunnelManager,
+		Broker:     broker,
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -52,7 +70,11 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	printStartup(cfg)
+	printStartup(cfg, tunnelManager.Status())
+
+	if cfg.Public {
+		go tunnelManager.Start()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -76,9 +98,10 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		log.Fatalf("shutdown server: %v", err)
 	}
+	tunnelManager.Stop()
 }
 
-func printStartup(cfg config.Config) {
+func printStartup(cfg config.Config, tunnelStatus tunnel.Status) {
 	baseURL := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
 	forward := cfg.ForwardURL
 	if forward == "" {
@@ -91,6 +114,13 @@ func printStartup(cfg config.Config) {
 	fmt.Printf("Webhook URL:     %s/hooks/default\n", baseURL)
 	fmt.Printf("Forward target:  %s\n", forward)
 	fmt.Printf("Database:        %s\n", cfg.DBPath)
+	if cfg.Public || tunnelStatus.State == tunnel.StateExternal {
+		if tunnelStatus.URL != "" {
+			fmt.Printf("Public URL:      %s\n", tunnelStatus.URL)
+		} else {
+			fmt.Println("Public URL:      starting cloudflared quick tunnel...")
+		}
+	}
 	if cfg.Host == "0.0.0.0" {
 		fmt.Println()
 		fmt.Println("Warning: Hookstash is listening on 0.0.0.0. Your dashboard may be reachable from other devices on your network.")

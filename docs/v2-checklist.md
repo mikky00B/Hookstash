@@ -26,6 +26,7 @@ maps to a section in `docs/v2-plan.md`.
 - [x] Tunnel status over SSE (`tunnel.started`, `tunnel.error`)
 - [x] Fallback card with install instructions when cloudflared is missing
 - [x] `--tunnel-url` / `HOOKSTASH_TUNNEL_URL` for user-managed tunnels
+- [x] Smoke-tested: fresh status (`disabled`), missing-binary fallback (error + install hint), external mode (`--tunnel-url`)
 
 ## M3 — Signature Lab: verify
 

@@ -14,6 +14,8 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [liveStatus, setLiveStatus] = useState("Offline");
+  const [tunnelStatus, setTunnelStatus] = useState(null);
+  const [tunnelRefresh, setTunnelRefresh] = useState(0);
 
   const loadEndpoints = useCallback(async () => {
     try {
@@ -59,9 +61,24 @@ function App() {
     [activeEndpoint]
   );
 
+  const loadTunnel = useCallback(async () => {
+    try {
+      const response = await fetch("/api/tunnel");
+      if (response.ok) {
+        setTunnelStatus(await response.json());
+      }
+    } catch {
+      // tunnel status is optional UI; ignore fetch failures
+    }
+  }, []);
+
   useEffect(() => {
     loadEndpoints();
   }, [loadEndpoints]);
+
+  useEffect(() => {
+    loadTunnel();
+  }, [loadTunnel, tunnelRefresh]);
 
   useEffect(() => {
     loadRequests({ showLoading: true });
@@ -87,6 +104,12 @@ function App() {
     events.addEventListener("request.created", () => {
       loadRequests();
     });
+
+    for (const eventType of ["tunnel.starting", "tunnel.started", "tunnel.error", "tunnel.stopped"]) {
+      events.addEventListener(eventType, () => {
+        setTunnelRefresh((value) => value + 1);
+      });
+    }
 
     return () => {
       events.close();
@@ -132,6 +155,8 @@ function App() {
         onSelect={setActiveEndpoint}
         onChanged={loadEndpoints}
       />
+
+      <TunnelCard status={tunnelStatus} onChanged={loadTunnel} />
 
       {loading ? (
         <div className="panel loading-panel">Loading captured requests...</div>
@@ -253,6 +278,65 @@ function EndpointBar({ endpoints, activeEndpoint, onSelect, onChanged }) {
             Copy
           </button>
         </div>
+      )}
+    </section>
+  );
+}
+
+function TunnelCard({ status, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const state = status?.state || "disabled";
+
+  async function tunnelAction(action) {
+    setBusy(true);
+    try {
+      await fetch(`/api/tunnel/${action}`, { method: "POST" });
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const canStart = ["disabled", "stopped", "error"].includes(state);
+  const canStop = ["starting", "running"].includes(state);
+
+  return (
+    <section className="panel tunnel-card" aria-label="Public URL">
+      <div className="tunnel-row">
+        <span className={`tunnel-state tunnel-state-${state}`}>{state}</span>
+        <strong>Public URL</strong>
+        {status?.url && <code className="tunnel-url">{status.url}</code>}
+        {status?.url && (
+          <button type="button" onClick={() => navigator.clipboard?.writeText(status.url).catch(() => {})}>
+            Copy
+          </button>
+        )}
+        {canStart && (
+          <button type="button" disabled={busy} onClick={() => tunnelAction("start")}>
+            {busy ? "Working..." : "Start cloudflared tunnel"}
+          </button>
+        )}
+        {canStop && (
+          <button type="button" disabled={busy} onClick={() => tunnelAction("stop")}>
+            {busy ? "Working..." : "Stop"}
+          </button>
+        )}
+      </div>
+      {state === "starting" && <p className="tunnel-note">Waiting for cloudflared to assign a URL...</p>}
+      {state === "error" && (
+        <div className="tunnel-problem">
+          <p>{status?.error || "The tunnel failed."}</p>
+          {status?.hint && <p className="tunnel-hint">{status.hint}</p>}
+        </div>
+      )}
+      {state === "external" && (
+        <p className="tunnel-note">Displayed from --tunnel-url. You manage this tunnel yourself.</p>
+      )}
+      {state === "disabled" && (
+        <p className="tunnel-note">
+          Start a free Cloudflare quick tunnel (no account) to receive real provider webhooks.
+          Requires the cloudflared binary on your PATH.
+        </p>
       )}
     </section>
   );

@@ -21,9 +21,36 @@ Hookstash is early. The current build includes:
 - Realtime dashboard refresh with Server-Sent Events
 - Replay captured requests to a target URL
 
-In progress on the v2 branch (see `docs/v2-plan.md`): public URLs via wrapped
-Cloudflare quick tunnels, signature verification and re-signing on replay, and
-request exports.
+In progress on the v2 branch (see `docs/v2-plan.md`): signature verification
+and re-signing on replay, and request exports.
+
+## Public URL (cloudflared quick tunnel)
+
+Hookstash can expose itself to the internet through a free Cloudflare quick
+tunnel — no account, no cost. Install the `cloudflared` binary, then either:
+
+```bash
+hookstash --public            # start a quick tunnel at boot
+```
+
+or click **Start cloudflared tunnel** in the dashboard. Hookstash spawns
+`cloudflared tunnel --url http://127.0.0.1:<port>` and shows the assigned
+`https://<random>.trycloudflare.com` URL in the dashboard and on startup. The
+tunnel process is stopped when Hookstash exits.
+
+If cloudflared is not installed, the dashboard shows install instructions and
+local capture keeps working.
+
+Already running your own (named) tunnel? Just display it:
+
+```bash
+hookstash --tunnel-url https://hooks.yourdomain.com
+# or: HOOKSTASH_TUNNEL_URL=https://hooks.yourdomain.com
+```
+
+With a public URL open, protect capture endpoints with tokens (see
+[Multiple capture endpoints](#multiple-capture-endpoints)) so strangers cannot
+write into your capture list. See `docs/setup-and-keys.md` for details.
 
 Replay editing, retry controls, and cURL export are planned next.
 
@@ -131,7 +158,12 @@ HOOKSTASH_PORT
 HOOKSTASH_FORWARD_URL
 HOOKSTASH_DB_PATH
 HOOKSTASH_LOG_LEVEL
+HOOKSTASH_PUBLIC
+HOOKSTASH_TUNNEL_URL
 ```
+
+Set `HOOKSTASH_PUBLIC` to `1`/`true` to start a quick tunnel at boot, and
+`HOOKSTASH_TUNNEL_URL` to display a tunnel you manage yourself.
 
 CLI flags take priority over environment variables.
 

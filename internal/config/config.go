@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -13,6 +14,8 @@ type Config struct {
 	DBPath      string
 	OpenBrowser bool
 	LogLevel    string
+	Public      bool
+	TunnelURL   string
 }
 
 func Default() Config {
@@ -40,8 +43,22 @@ func Default() Config {
 	if value := os.Getenv("HOOKSTASH_LOG_LEVEL"); value != "" {
 		cfg.LogLevel = value
 	}
+	if isTruthy(os.Getenv("HOOKSTASH_PUBLIC")) {
+		cfg.Public = true
+	}
+	if value := os.Getenv("HOOKSTASH_TUNNEL_URL"); value != "" {
+		cfg.TunnelURL = value
+	}
 
 	return cfg
+}
+
+func isTruthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func defaultDBPath() string {
